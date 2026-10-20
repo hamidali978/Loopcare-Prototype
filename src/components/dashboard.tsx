@@ -1,13 +1,34 @@
 "use client";
-import { useMemo, useState } from "react";
-import { CheckCircle2, Download, FileText, Loader2, Play, RefreshCcw, ShieldAlert, Volume2 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import { Fragment, useMemo, useState } from "react";
+import type { ChangeEvent, ReactNode } from "react";
+import {
+  AlertTriangle,
+  Calendar,
+  ChevronRight,
+  Download,
+  FilePlus,
+  Files,
+  FileText,
+  HeartPulse,
+  Home,
+  ListChecks,
+  Loader2,
+  MoreVertical,
+  Search,
+  Settings,
+  Upload,
+  User,
+  Users,
+  Volume2,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { FindingCard, findingToSpeech, speak, stopSpeaking } from "@/components/finding-card";
 import { VoiceInput } from "@/components/voice-input";
 import { DEMO_DOCS, SAMPLE_AUDITS } from "@/lib/demo";
-import type { AuditResult, RuleId, Severity } from "@/lib/types";
+import type { AuditResult, Finding, RuleId, Severity } from "@/lib/types";
+
+const MAX_CHARS = 20000;
+const MAX_FILE_BYTES = 1_000_000;
 
 const RULE_LABELS: Record<RuleId, string> = {
   MISSING_OWNER: "Missing owner",
@@ -16,193 +37,526 @@ const RULE_LABELS: Record<RuleId, string> = {
   UNRESOLVED_DEPENDENCY: "Unresolved dependency",
   RESULT_REVIEW_NOT_DOCUMENTED: "Result review not documented",
 };
-const select = "h-9 rounded-md border border-brand-200 bg-white px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500";
+const VERIFY_RULES = new Set<string>(["RESULT_REVIEW_NOT_DOCUMENTED", "COMPLETED_NO_EVIDENCE"]);
+
+const SEV_RANK: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
+const SEV_STYLE: Record<Severity, string> = {
+  high: "bg-red-50 text-red-600",
+  medium: "bg-amber-50 text-amber-700",
+  low: "bg-slate-100 text-slate-600",
+};
+const STATUS_STYLE: Record<string, string> = {
+  completed: "bg-green-50 text-green-700",
+  pending: "bg-blue-50 text-blue-600",
+  unknown: "bg-amber-50 text-amber-700",
+};
+
+type FindingRef = Finding & { itemId?: string };
+
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+const label = (s: string) => cap(s.replace(/_/g, " "));
+const ring = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500";
+const select = `h-9 rounded-md border border-slate-200 bg-white px-2.5 text-sm text-slate-700 ${ring}`;
+
+function Pill({ className = "", children }: { className?: string; children: ReactNode }) {
+  return (
+    <span className={`inline-block whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium ${className}`}>{children}</span>
+  );
+}
+
+function SampleArt() {
+  return (
+    <svg viewBox="0 0 170 130" className="h-28 w-auto shrink-0" aria-hidden>
+      <rect x="22" y="14" width="96" height="108" rx="6" fill="#fff" stroke="#cfe8dc" transform="rotate(-8 70 68)" />
+      <rect x="46" y="8" width="100" height="112" rx="6" fill="#fff" stroke="#b7dcc9" />
+      <text x="58" y="30" fontSize="9" fontWeight="700" fill="#14532d">Discharge</text>
+      <text x="58" y="41" fontSize="9" fontWeight="700" fill="#14532d">Summary</text>
+      {[54, 63, 72, 81, 90, 99].map((y, i) => (
+        <rect key={y} x="58" y={y} width={i % 2 ? 62 : 76} height="3" rx="1.5" fill="#d7e6de" />
+      ))}
+      <circle cx="136" cy="100" r="17" fill="#16a34a" />
+      <path d="M136 91v18M127 100h18" stroke="#fff" strokeWidth="3.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+const NAV: { href: string; label: string; icon: LucideIcon; active?: boolean }[] = [
+  { href: "#top", label: "Dashboard", icon: Home, active: true },
+  { href: "#audit", label: "New Audit", icon: FilePlus },
+  { href: "#sample", label: "Sample Documents", icon: Files },
+  { href: "#findings", label: "All Audits", icon: ListChecks },
+];
 
 export default function Dashboard() {
   const [audits, setAudits] = useState<AuditResult[]>(SAMPLE_AUDITS);
   const [text, setText] = useState("");
+  const [tab, setTab] = useState<"write" | "upload" | "samples">("write");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [demoNote, setDemoNote] = useState<string | null>(null);
+  const [cat, setCat] = useState<"all" | RuleId>("all");
+  const [stat, setStat] = useState("all");
   const [sev, setSev] = useState<"all" | Severity>("all");
-  const [rule, setRule] = useState<"all" | RuleId>("all");
-  const [auditId, setAuditId] = useState("all");
   const [q, setQ] = useState("");
-  const [lastDemoNote, setLastDemoNote] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
 
-  const findings = useMemo(
-    () => audits.flatMap((a) => a.findings.map((f) => ({ f, a }))),
+  const rows = useMemo(
+    () =>
+      audits.flatMap((a) =>
+        a.findings.map((f) => {
+          const itemId = (f as FindingRef).itemId;
+          const item =
+            (itemId ? a.items.find((i) => i.id === itemId) : undefined) ??
+            a.items.find((i) => i.description === f.itemDescription) ??
+            null;
+          return { f, a, key: `${a.id}-${f.id}`, item };
+        }),
+      ),
     [audits],
   );
-  const filtered = findings.filter(({ f, a }) =>
-    (sev === "all" || f.severity === sev) && (rule === "all" || f.ruleId === rule) &&
-    (auditId === "all" || a.id === auditId) &&
-    (!q || `${f.title} ${f.itemDescription} ${f.excerpt}`.toLowerCase().includes(q.toLowerCase())));
 
-  const metrics = [
-    { label: "Documents audited", value: audits.length },
-    { label: "Action items found", value: audits.reduce((n, a) => n + a.items.length, 0) },
-    { label: "Items to verify", value: findings.length },
-    { label: "High priority", value: findings.filter(({ f }) => f.severity === "high").length },
+  const statusOptions = useMemo(
+    () => Array.from(new Set(rows.map((r) => String(r.item?.status ?? "unknown")))),
+    [rows],
+  );
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return rows
+      .filter(
+        ({ f, item }) =>
+          (cat === "all" || f.ruleId === cat) &&
+          (sev === "all" || f.severity === sev) &&
+          (stat === "all" || String(item?.status ?? "unknown") === stat) &&
+          (!needle || `${f.title} ${f.itemDescription} ${f.excerpt}`.toLowerCase().includes(needle)),
+      )
+      .sort((x, y) => SEV_RANK[x.f.severity] - SEV_RANK[y.f.severity]);
+  }, [rows, cat, sev, stat, q]);
+
+  const filtersActive = cat !== "all" || stat !== "all" || sev !== "all" || q !== "";
+  const mode = audits[0]?.source === "demo" ? "Demo Mode" : "Live · Gemini";
+
+  const stats: { label: string; value: number; icon: LucideIcon; tile: string }[] = [
+    { label: "Actions Extracted", value: audits.reduce((n, a) => n + a.items.length, 0), icon: FileText, tile: "bg-green-50 text-green-600" },
+    { label: "Potential Gaps", value: rows.length, icon: AlertTriangle, tile: "bg-red-50 text-red-500" },
+    { label: "Missing Owners", value: rows.filter(({ f }) => f.ruleId === "MISSING_OWNER").length, icon: Users, tile: "bg-orange-50 text-orange-500" },
+    { label: "Need Verification", value: rows.filter(({ f }) => VERIFY_RULES.has(f.ruleId)).length, icon: Calendar, tile: "bg-blue-50 text-blue-600" },
   ];
 
+  function clearFilters() {
+    setCat("all");
+    setStat("all");
+    setSev("all");
+    setQ("");
+  }
+
   async function run() {
-    setError(null); setLoading(true);
+    setError(null);
+    setLoading(true);
     try {
-      const res = await fetch("/api/audit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+      const res = await fetch("/api/audit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
       const data = await res.json().catch(() => null);
       if (!res.ok || !data) throw new Error(data?.error ?? `Audit failed (HTTP ${res.status}).`);
-      setAudits((p) => [data as AuditResult, ...p]);
-      setLastDemoNote((data as AuditResult).source === "demo" ? (data as AuditResult).demoReason ?? "Demo results." : null);
+      const result = data as AuditResult;
+      setAudits((p) => [result, ...p]);
+      setDemoNote(result.source === "demo" ? result.demoReason ?? "These are sample results." : null);
+      clearFilters();
+      setOpen(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong. Try again.");
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setError(null);
+    if (!/\.(txt|md|text)$/i.test(file.name) && !file.type.startsWith("text/")) {
+      setError("Only plain-text files (.txt, .md) can be uploaded right now. For a PDF, copy the text and paste it.");
+      return;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      setError("That file is over 1 MB. Paste the relevant section instead.");
+      return;
+    }
+    setText((await file.text()).slice(0, MAX_CHARS));
+    setTab("write");
   }
 
   function exportJson() {
-    const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), disclaimer: "Prototype output; not clinically validated.", audits }, null, 2)], { type: "application/json" });
+    const blob = new Blob(
+      [
+        JSON.stringify(
+          { exportedAt: new Date().toISOString(), disclaimer: "Prototype output; not clinically validated.", audits },
+          null,
+          2,
+        ),
+      ],
+      { type: "application/json" },
+    );
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob); a.download = "loopcare-audit.json"; a.click(); URL.revokeObjectURL(a.href);
+    a.href = url;
+    a.download = "loopcare-audit.json";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   function readHigh() {
     const hi = filtered.filter(({ f }) => f.severity === "high");
     if (!hi.length) return;
     stopSpeaking();
-    speak(`${hi.length} high priority findings. ` + hi.map(({ f }, i) => `Finding ${i + 1}. ${findingToSpeech(f)}`).join(" "));
+    speak(
+      `${hi.length} high priority findings. ` +
+        hi.map(({ f }, i) => `Finding ${i + 1}. ${findingToSpeech(f)}`).join(" "),
+    );
   }
 
   return (
-    <div className="min-h-screen">
-      <header className="bg-brand-800 text-white">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-4">
-          <div className="flex items-center gap-3">
-            <RefreshCcw className="h-6 w-6 text-brand-200" aria-hidden />
-            <div>
-              <h1 className="font-display text-2xl leading-none">LoopCare</h1>
-              <p className="text-xs text-brand-100">Find open loops in care handoffs</p>
-            </div>
+    <div id="top" className="min-h-screen bg-slate-50 text-slate-900 lg:flex">
+      <aside className="bg-brand-900 text-brand-100 lg:sticky lg:top-0 lg:h-screen lg:w-60 lg:shrink-0">
+        <div className="flex items-center gap-6 overflow-x-auto px-4 py-3 lg:flex-col lg:items-stretch lg:gap-8 lg:overflow-visible lg:px-4 lg:py-6">
+          <div className="flex shrink-0 items-center gap-2 lg:px-2">
+            <HeartPulse className="h-7 w-7 text-green-400" aria-hidden />
+            <span className="text-lg font-bold text-white">LoopCare</span>
           </div>
-          <Badge tone="green" className="bg-white/15 text-white">Prototype · synthetic data only</Badge>
+          <nav aria-label="Main" className="flex gap-1 lg:flex-col">
+            {NAV.map(({ href, label: text, icon: Icon, active }) => (
+              <a
+                key={href}
+                href={href}
+                aria-current={active ? "page" : undefined}
+                className={`flex shrink-0 items-center gap-3 rounded-md px-3 py-2 text-sm ${ring} ${
+                  active ? "bg-white/10 font-medium text-white" : "hover:bg-white/5 hover:text-white"
+                }`}
+              >
+                <Icon className="h-4 w-4" aria-hidden />
+                {text}
+              </a>
+            ))}
+            <span
+              aria-disabled="true"
+              title="Coming soon"
+              className="flex shrink-0 cursor-not-allowed items-center gap-3 rounded-md px-3 py-2 text-sm opacity-50"
+            >
+              <Settings className="h-4 w-4" aria-hidden />
+              Settings
+            </span>
+          </nav>
         </div>
-      </header>
+      </aside>
 
-      <main className="mx-auto max-w-6xl space-y-6 px-4 py-6">
-        <section aria-label="Metrics" className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          {metrics.map((m) => (
-            <Card key={m.label} className="p-4">
-              <p className="font-display text-3xl text-brand-700">{m.value}</p>
-              <p className="text-sm text-slate-600">{m.label}</p>
-            </Card>
+      <main className="min-w-0 flex-1 space-y-5 px-4 py-6 lg:px-8">
+        <header className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold">Welcome to LoopCare</h1>
+            <p className="mt-1 text-sm text-slate-500">
+              Review care-transition documents, identify potential gaps, and keep follow-up on track.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-green-200 bg-green-50 px-3 py-1 text-xs font-medium text-green-700">
+              <span className="h-1.5 w-1.5 rounded-full bg-green-500" aria-hidden />
+              {mode}
+            </span>
+            <span className="grid h-8 w-8 place-items-center rounded-full border border-slate-200 bg-white text-slate-500" aria-hidden>
+              <User className="h-4 w-4" />
+            </span>
+          </div>
+        </header>
+
+        <section aria-label="Summary" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+          {stats.map(({ label: name, value, icon: Icon, tile }) => (
+            <div key={name} className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <span className={`grid h-11 w-11 shrink-0 place-items-center rounded-lg ${tile}`} aria-hidden>
+                <Icon className="h-5 w-5" />
+              </span>
+              <div>
+                <p className="text-2xl font-bold leading-none">{value}</p>
+                <p className="mt-1 text-sm text-slate-500">{name}</p>
+              </div>
+            </div>
           ))}
         </section>
 
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
-          <section aria-label="New audit" className="space-y-3">
-            <Card className="p-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="font-display text-xl text-brand-900">Audit a handoff</h2>
-                <VoiceInput onFinal={(t) => setText((p) => p + (p && !p.endsWith(" ") && !p.endsWith("\n") ? " " : "") + t)} />
-              </div>
-              <label htmlFor="doc" className="mt-3 block text-sm text-slate-600">
-                Paste or dictate a synthetic document. Dictation lands here so you can edit it before running the audit.
-              </label>
-              <textarea id="doc" value={text} onChange={(e) => setText(e.target.value)} rows={12}
-                placeholder="Paste a fictional discharge or handoff note…"
-                className="mt-2 w-full rounded-md border border-brand-200 p-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500" />
-              <div className="mt-1 flex justify-between text-xs text-slate-500">
-                <span>{text.length.toLocaleString()} / 20,000 characters</span>
-                <span>Do not enter real patient information.</span>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button onClick={run} disabled={loading || text.trim().length < 20}>
-                  {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                  {loading ? "Auditing…" : "Run audit"}
-                </Button>
-                {DEMO_DOCS.map((d, i) => (
-                  <Button key={d.title} variant="outline" onClick={() => setText(d.text)}>
-                    <FileText className="h-4 w-4" /> Load sample {i + 1}
-                  </Button>
-                ))}
-              </div>
-              {error && <p role="alert" className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-800">{error}</p>}
-              {lastDemoNote && (
-                <p className="mt-3 rounded-md bg-amber-50 p-3 text-sm text-amber-900" role="status">
-                  <strong>Demo results.</strong> {lastDemoNote}
-                </p>
-              )}
-            </Card>
-            <p className="text-xs text-slate-500">
-              LoopCare is a prototype. It is not clinically validated, not a medical device, and not HIPAA compliant. Findings flag text that may need a second look; they are not conclusions about care.
-            </p>
-          </section>
+        <div className="grid gap-5 xl:grid-cols-2">
+          <section id="audit" aria-label="Audit a document" className="scroll-mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h2 className="font-semibold">Audit a Document</h2>
 
-          <section aria-label="Exception queue" className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="font-display text-xl text-brand-900">Exception queue <span className="text-base text-slate-500">({filtered.length})</span></h2>
-              <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={readHigh}><Volume2 className="h-4 w-4" /> Read high priority</Button>
-                <Button size="sm" variant="outline" onClick={exportJson}><Download className="h-4 w-4" /> Export JSON</Button>
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2" role="group" aria-label="Filters">
-              <input aria-label="Search findings" placeholder="Search…" value={q} onChange={(e) => setQ(e.target.value)} className={select + " w-36"} />
-              <select aria-label="Severity" className={select} value={sev} onChange={(e) => setSev(e.target.value as "all" | Severity)}>
-                <option value="all">All severities</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option>
-              </select>
-              <select aria-label="Rule" className={select} value={rule} onChange={(e) => setRule(e.target.value as "all" | RuleId)}>
-                <option value="all">All rules</option>
-                {Object.entries(RULE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-              </select>
-              <select aria-label="Document" className={select} value={auditId} onChange={(e) => setAuditId(e.target.value)}>
-                <option value="all">All documents</option>
-                {audits.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
-              </select>
-            </div>
-            <div className="flex flex-wrap gap-2 text-xs">
-              {audits.map((a) => (
-                <Badge key={a.id} tone={a.source === "demo" ? "amber" : "green"}>
-                  {a.source === "demo" ? "Demo" : "Gemini"}: {a.title}
-                </Badge>
+            <div role="tablist" aria-label="Input source" className="mt-3 grid grid-cols-3 gap-1 rounded-md border border-slate-200 p-0.5">
+              {(
+                [
+                  ["write", "Paste Text"],
+                  ["upload", "Upload File"],
+                  ["samples", "Use Sample"],
+                ] as const
+              ).map(([t, name]) => (
+                <button
+                  key={t}
+                  role="tab"
+                  aria-selected={tab === t}
+                  onClick={() => setTab(t)}
+                  className={`rounded px-2 py-1.5 text-sm ${ring} ${
+                    tab === t ? "bg-brand-50 font-medium text-brand-800 ring-1 ring-brand-500" : "text-slate-600 hover:bg-slate-50"
+                  }`}
+                >
+                  {name}
+                </button>
               ))}
             </div>
-            {filtered.length === 0 ? (
-              <Card className="flex items-center gap-3 p-6 text-sm text-slate-600">
-                <CheckCircle2 className="h-5 w-5 text-brand-600" />
-                {findings.length === 0 ? "No findings yet. Run an audit to fill the queue." : "No findings match these filters."}
-              </Card>
-            ) : (
-              <div className="space-y-3">
-                {filtered.map(({ f, a }) => <FindingCard key={`${a.id}-${f.id}`} f={f} auditTitle={a.title} />)}
+
+            {tab === "write" && (
+              <div className="mt-3">
+                <label htmlFor="doc" className="sr-only">Document text</label>
+                <textarea
+                  id="doc"
+                  value={text}
+                  maxLength={MAX_CHARS}
+                  onChange={(e) => setText(e.target.value)}
+                  rows={7}
+                  autoComplete="off"
+                  placeholder="Paste a discharge summary or care-transition document…"
+                  className={`w-full resize-y rounded-md border border-slate-200 p-3 text-sm placeholder:text-slate-400 ${ring}`}
+                />
+                <div className="mt-1 flex justify-between text-xs text-slate-500">
+                  <span>Please don’t enter real patient information.</span>
+                  <span>{text.length.toLocaleString()}/{MAX_CHARS.toLocaleString()}</span>
+                </div>
+              </div>
+            )}
+
+            {tab === "upload" && (
+              <label className="mt-3 flex cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-600 focus-within:ring-2 focus-within:ring-brand-500 hover:bg-slate-50">
+                <Upload className="h-6 w-6 text-slate-400" aria-hidden />
+                <span className="font-medium text-brand-700">Choose a .txt or .md file</span>
+                <span className="text-xs text-slate-500">Plain text only, up to 1 MB. It opens in the editor so you can review it first.</span>
+                <input type="file" accept=".txt,.md,.text,text/plain,text/markdown" onChange={onFile} className="sr-only" />
+              </label>
+            )}
+
+            {tab === "samples" && (
+              <ul className="mt-3 divide-y divide-slate-100 rounded-md border border-slate-200">
+                {DEMO_DOCS.map((d) => (
+                  <li key={d.title} className="flex items-center justify-between gap-3 px-3 py-2.5 text-sm">
+                    <span>{d.title}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setText(d.text);
+                        setTab("write");
+                      }}
+                      className={`rounded-md border border-brand-500 bg-white px-3 py-1 text-xs font-medium text-brand-700 hover:bg-brand-50 ${ring}`}
+                    >
+                      Load
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <VoiceInput onFinal={(t) => setText((p) => p + (p && !/\s$/.test(p) ? " " : "") + t)} />
+              <button
+                type="button"
+                onClick={run}
+                disabled={loading || text.trim().length < 20}
+                className={`inline-flex h-10 items-center justify-center gap-2 rounded-md bg-brand-800 px-3 text-sm font-medium text-white hover:bg-brand-900 disabled:cursor-not-allowed disabled:opacity-50 ${ring}`}
+              >
+                {loading && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
+                {loading ? "Auditing…" : "Audit Document"}
+                {!loading && <ChevronRight className="h-4 w-4" aria-hidden />}
+              </button>
+            </div>
+
+            {error && (
+              <p role="alert" className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-800">
+                {error}
+              </p>
+            )}
+            {demoNote && (
+              <div role="status" className="mt-3 rounded-md bg-amber-50 p-3 text-sm text-amber-900">
+                <p>
+                  <strong>Demo results.</strong> {demoNote}
+                </p>
+                {/GEMINI_API_KEY/.test(demoNote) && (
+                  <p className="mt-1 text-xs">
+                    To audit your own text, add <code>GEMINI_API_KEY</code> to <code>.env.local</code> (never commit it) and restart the dev server.
+                  </p>
+                )}
               </div>
             )}
           </section>
+
+          <section id="sample" aria-label="Sample document" className="flex scroll-mt-6 items-center justify-between gap-4 rounded-xl border border-brand-100 bg-brand-50 p-5">
+            <div>
+              <span className="grid h-9 w-9 place-items-center rounded-lg bg-white text-brand-700 shadow-sm" aria-hidden>
+                <FileText className="h-5 w-5" />
+              </span>
+              <h2 className="mt-3 text-lg font-semibold text-brand-900">Sample Document</h2>
+              <p className="mt-1 max-w-xs text-sm text-slate-600">
+                Try a fictional discharge summary to see how LoopCare works.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setText(DEMO_DOCS[0]?.text ?? "");
+                  setTab("write");
+                  document.getElementById("audit")?.scrollIntoView({ behavior: "smooth", block: "start" });
+                }}
+                className={`mt-4 h-10 rounded-md bg-brand-800 px-4 text-sm font-medium text-white hover:bg-brand-900 ${ring}`}
+              >
+                Load Sample Document
+              </button>
+            </div>
+            <SampleArt />
+          </section>
         </div>
 
-        <section aria-label="Extracted items" className="space-y-2">
-          <h2 className="flex items-center gap-2 font-display text-xl text-brand-900"><ShieldAlert className="h-5 w-5" /> Extracted action items</h2>
-          {audits.slice(0, 3).map((a) => (
-            <details key={a.id} className="rounded-lg border border-brand-100 bg-white p-3">
-              <summary className="cursor-pointer text-sm font-medium">{a.title} — {a.items.length} items {a.source === "demo" && "(demo)"}</summary>
-              <div className="mt-2 overflow-x-auto">
-                <table className="w-full min-w-[640px] text-left text-sm">
-                  <thead className="text-slate-500"><tr><th className="py-1 pr-3">Item</th><th className="pr-3">Owner</th><th className="pr-3">Due</th><th className="pr-3">Status</th><th className="pr-3">Depends on</th><th>Evidence</th></tr></thead>
-                  <tbody>
-                    {a.items.map((i) => (
-                      <tr key={i.id} className="border-t border-brand-50 align-top">
-                        <td className="py-1.5 pr-3">{i.description}</td>
-                        <td className="pr-3">{i.owner ?? <span className="text-slate-400">not stated</span>}</td>
-                        <td className="pr-3">{i.dueDate ?? <span className="text-slate-400">not stated</span>}</td>
-                        <td className="pr-3">{i.status.replace("_", " ")}</td>
-                        <td className="pr-3">{i.dependencies.join(", ") || "—"}</td>
-                        <td>{i.evidence ?? <span className="text-slate-400">not stated</span>}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+        <section id="findings" aria-label="Audit findings" className="scroll-mt-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="font-semibold">Audit Findings ({filtered.length})</h2>
+            <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filters">
+              <select aria-label="Category" autoComplete="off" className={select} value={cat} onChange={(e) => setCat(e.target.value as "all" | RuleId)}>
+                <option value="all">All Categories</option>
+                {Object.entries(RULE_LABELS).map(([k, v]) => (
+                  <option key={k} value={k}>{v}</option>
+                ))}
+              </select>
+              <select aria-label="Status" autoComplete="off" className={select} value={stat} onChange={(e) => setStat(e.target.value)}>
+                <option value="all">All Status</option>
+                {statusOptions.map((s) => (
+                  <option key={s} value={s}>{label(s)}</option>
+                ))}
+              </select>
+              <select aria-label="Priority" autoComplete="off" className={select} value={sev} onChange={(e) => setSev(e.target.value as "all" | Severity)}>
+                <option value="all">All Priority</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden />
+                <input
+                  aria-label="Search findings"
+                  placeholder="Search findings…"
+                  autoComplete="off"
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  className={`h-9 w-44 rounded-md border border-slate-200 bg-white pl-8 pr-2 text-sm placeholder:text-slate-400 ${ring}`}
+                />
               </div>
-            </details>
-          ))}
+              <button type="button" onClick={readHigh} title="Read high priority findings aloud" aria-label="Read high priority findings aloud" className={`grid h-9 w-9 place-items-center rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50 ${ring}`}>
+                <Volume2 className="h-4 w-4" aria-hidden />
+              </button>
+              <button type="button" onClick={exportJson} title="Export JSON" aria-label="Export JSON" className={`grid h-9 w-9 place-items-center rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50 ${ring}`}>
+                <Download className="h-4 w-4" aria-hidden />
+              </button>
+            </div>
+          </div>
+
+          {filtered.length === 0 ? (
+            <p className="mt-4 rounded-md border border-dashed border-slate-300 px-4 py-8 text-center text-sm text-slate-600">
+              {rows.length === 0 ? "No findings yet. Audit a document to fill this table." : "No findings match these filters."}
+              {filtersActive && rows.length > 0 && (
+                <>
+                  {" "}
+                  <button type="button" onClick={clearFilters} className={`font-medium text-brand-700 underline ${ring}`}>
+                    Clear filters
+                  </button>
+                </>
+              )}
+            </p>
+          ) : (
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full min-w-[900px] text-left text-sm">
+                <thead className="text-xs font-medium text-slate-500">
+                  <tr className="border-b border-slate-200">
+                    <th scope="col" className="py-2 pr-3 font-medium">Action</th>
+                    <th scope="col" className="px-3 font-medium">Owner</th>
+                    <th scope="col" className="px-3 font-medium">Due Date</th>
+                    <th scope="col" className="px-3 font-medium">Status</th>
+                    <th scope="col" className="px-3 font-medium">Finding</th>
+                    <th scope="col" className="px-3 font-medium">Priority</th>
+                    <th scope="col" className="px-3 font-medium">Review</th>
+                    <th scope="col" className="w-8"><span className="sr-only">More</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map(({ f, a, key, item }) => {
+                    const isOpen = open === key;
+                    const status = String(item?.status ?? "unknown");
+                    return (
+                      <Fragment key={key}>
+                        <tr className="border-b border-slate-100 align-middle">
+                          <td className="max-w-[240px] py-3 pr-3">{f.itemDescription}</td>
+                          <td className="px-3">
+                            {item?.owner ? item.owner : <Pill className="bg-red-50 text-red-600">Not documented</Pill>}
+                          </td>
+                          <td className="px-3">
+                            {item?.dueDate ? item.dueDate : <Pill className="bg-red-50 text-red-600">Not documented</Pill>}
+                          </td>
+                          <td className="px-3">
+                            <Pill className={STATUS_STYLE[status] ?? "bg-slate-100 text-slate-600"}>{label(status)}</Pill>
+                          </td>
+                          <td className="px-3">{f.title}</td>
+                          <td className="px-3">
+                            <Pill className={SEV_STYLE[f.severity]}>{cap(f.severity)}</Pill>
+                          </td>
+                          <td className="px-3">
+                            <button
+                              type="button"
+                              aria-expanded={isOpen}
+                              onClick={() => setOpen(isOpen ? null : key)}
+                              className={`whitespace-nowrap rounded-md border px-3 py-1 text-xs font-medium ${ring} ${
+                                isOpen
+                                  ? "border-brand-700 bg-brand-700 text-white"
+                                  : "border-brand-500 bg-white text-brand-700 hover:bg-brand-50"
+                              }`}
+                            >
+                              Needs Review
+                            </button>
+                          </td>
+                          <td className="pr-1">
+                            <button
+                              type="button"
+                              aria-label={`Read aloud: ${f.title}`}
+                              title="Read aloud"
+                              onClick={() => {
+                                stopSpeaking();
+                                speak(findingToSpeech(f));
+                              }}
+                              className={`rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 ${ring}`}
+                            >
+                              <MoreVertical className="h-4 w-4" aria-hidden />
+                            </button>
+                          </td>
+                        </tr>
+                        {isOpen && (
+                          <tr className="border-b border-slate-100 bg-slate-50">
+                            <td colSpan={8} className="px-4 py-4">
+                              <FindingCard f={f} auditTitle={a.title} />
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
+
+        <p className="text-xs text-slate-500">
+          LoopCare is a prototype built on synthetic data. It is not clinically validated, not a medical device, and not HIPAA compliant. Findings flag text that may need a second look; they are not conclusions about care.
+        </p>
       </main>
     </div>
   );
