@@ -1,0 +1,6 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body { @apply bg-paper text-slate-900 antialiased; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
